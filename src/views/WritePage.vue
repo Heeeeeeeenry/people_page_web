@@ -77,9 +77,14 @@
               class="form-input"
               placeholder="搜索地址或地点名称..."
               @keydown.enter.prevent="searchLocation"
+              @input="onLocationInput"
+              @blur="onLocationBlur"
             />
             <button class="btn btn-search" @click="searchLocation" :disabled="searching">
               <svg viewBox="0 0 24 24" width="16" height="16"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z" fill="currentColor"/></svg>
+            </button>
+            <button class="btn btn-locate" @click="getCurrentLocation" :disabled="locating" type="button" title="获取当前位置">
+              <svg viewBox="0 0 24 24" width="16" height="16" :class="{ spinning: locating }"><path d="M12 8c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4-1.79-4-4-4zm8.94 3A8.994 8.994 0 0 0 13 3.06V1h-2v2.06A8.994 8.994 0 0 0 3.06 11H1v2h2.06A8.994 8.994 0 0 0 11 20.94V23h2v-2.06A8.994 8.994 0 0 0 20.94 13H23v-2h-2.06zM12 19c-3.87 0-7-3.13-7-7s3.13-7 7-7 7 3.13 7 7-3.13 7-7 7z" fill="currentColor"/></svg>
             </button>
           </div>
           <!-- 搜索建议 -->
@@ -126,6 +131,7 @@
           <h3><svg viewBox="0 0 24 24" width="18" height="18"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z" fill="#1677ff"/></svg> 信息预览</h3>
           <div class="preview-content">
             <table class="preview-table">
+              <tbody>
               <tr>
                 <td class="label">群众姓名</td>
                 <td class="value">{{ form.姓名 || '（未填写）' }}</td>
@@ -154,6 +160,7 @@
                 <td class="label" style="vertical-align:top;">诉求描述</td>
                 <td class="value description">{{ form.描述 || '（未填写）' }}</td>
               </tr>
+            </tbody>
             </table>
           </div>
         </div>
@@ -173,8 +180,10 @@
 </template>
 
 <script>
-import { ref, reactive, computed, onMounted, inject, nextTick } from 'vue'
+import { ref, reactive, computed, onMounted, inject, nextTick, onBeforeUnmount } from 'vue'
 import api, { submitLetter, regeocode, getInputTips, getCategories, classifyLetter } from '../utils/api.js'
+import L from 'leaflet'
+import 'leaflet/dist/leaflet.css'
 
 export default {
   name: 'WritePage',
@@ -253,6 +262,7 @@ export default {
     const mapInstance = ref(null)
     const marker = ref(null)
     const autoPhone = ref(false)
+    const locating = ref(false)
 
     const submitResult = ref(null)
     const submitting = ref(false)
@@ -316,10 +326,79 @@ export default {
       searching.value = false
     }
 
+    // 输入建议（防抖）
+    let locationDebounce = null
+    function onLocationInput() {
+      clearTimeout(locationDebounce)
+      const q = locationQuery.value.trim()
+      if (q.length < 2) {
+        addressList.value = []
+        return
+      }
+      locationDebounce = setTimeout(() => searchLocation(), 300)
+    }
+
+    // 输入框失焦时延迟关闭下拉（让点击选项先触发）
+    function onLocationBlur() {
+      setTimeout(() => { addressList.value = [] }, 200)
+    }
+
+    // 获取当前位置（浏览器定位）
+    async function getCurrentLocation() {
+      if (!navigator.geolocation) {
+        alert('您的浏览器不支持定位功能')
+        return
+      }
+      locating.value = true
+      try {
+        const pos = await new Promise((resolve, reject) => {
+          navigator.geolocation.getCurrentPosition(resolve, reject, {
+            enableHighAccuracy: true,
+            timeout: 10000,
+            maximumAge: 60000,
+          })
+        })
+        const { latitude, longitude } = pos.coords
+
+        // 逆地理编码获取地址
+        const res = await regeocode(longitude, latitude)
+        const rg = res.data?.regeocode
+        if (rg) {
+          const addr = {
+            name: rg.formatted_address || '当前位置',
+            address: rg.formatted_address || '',
+            location: `${longitude},${latitude}`,
+            province: rg.addressComponent?.province || '',
+            city: rg.addressComponent?.city || rg.addressComponent?.province || '',
+            district: rg.addressComponent?.district || '',
+          }
+          selectedAddress.value = addr
+          locationQuery.value = addr.name || addr.address || '当前位置'
+          await nextTick()
+          addressList.value = []
+          showMap.value = true
+          await nextTick()
+          initMap(longitude, latitude, addr.name)
+        } else {
+          alert('获取位置信息失败，请手动搜索地址')
+        }
+      } catch (e) {
+        const messages = {
+          1: '定位权限被拒绝，请在浏览器设置中允许位置访问',
+          2: '无法获取位置信息',
+          3: '定位请求超时',
+        }
+        alert(messages[e.code] || `定位失败：${e.message}`)
+      } finally {
+        locating.value = false
+      }
+    }
+
     async function selectAddress(addr) {
       selectedAddress.value = addr
       addressList.value = []
-      locationQuery.value = addr.name
+      locationQuery.value = addr.name || addr.address || addr.location || '已选位置'
+      await nextTick()
 
       // 尝试逆地理编码获取详细地址
       if (addr.location) {
@@ -331,10 +410,15 @@ export default {
             if (rg.addressComponent) {
               selectedAddress.value = {
                 ...addr,
-                address: rg.formattedAddress || rg.addressComponent?.building || addr.address,
+                address: rg.formatted_address || rg.addressComponent?.building || addr.address,
                 province: rg.addressComponent.province || addr.province,
                 city: rg.addressComponent.city || addr.city,
                 district: rg.addressComponent.district || addr.district,
+              }
+              // 逆地理编码后用更详细的地址更新搜索框
+              if (rg.formatted_address) {
+                locationQuery.value = rg.formatted_address
+                await nextTick()
               }
             }
           }
@@ -343,8 +427,8 @@ export default {
 
       showMap.value = true
       await nextTick()
-      // 在此处可以初始化高德地图（如果要显示地图）
-      // 由于高德JS API需要Key，这里显示一个占位
+      // 使用 Leaflet + OpenStreetMap 显示地图（无需 API Key）
+      initMap(lng, lat, addr.name)
     }
 
     function clearLocation() {
@@ -352,7 +436,59 @@ export default {
       locationQuery.value = ''
       addressList.value = []
       showMap.value = false
+      clearMap()
     }
+
+    // Leaflet 地图初始化
+    function initMap(lng, lat, name) {
+      clearMap()
+      const container = document.getElementById('map-container')
+      if (!container) return
+      mapInstance.value = L.map(container).setView([lat, lng], 15)
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+        maxZoom: 19,
+      }).addTo(mapInstance.value)
+      const marker = L.marker([lat, lng], { draggable: true }).addTo(mapInstance.value)
+        .bindPopup(name || '所选位置（可拖动调整）')
+        .openPopup()
+      // 拖拽结束后逆地理编码更新地址
+      marker.on('dragend', async () => {
+        const pos = marker.getLatLng()
+        const newLng = pos.lng.toFixed(6)
+        const newLat = pos.lat.toFixed(6)
+        try {
+          const res = await regeocode(newLng, newLat)
+          const rg = res.data?.regeocode
+          if (rg) {
+            selectedAddress.value = {
+              name: rg.formatted_address || '调整后位置',
+              address: rg.formatted_address || '',
+              location: `${newLng},${newLat}`,
+              province: rg.addressComponent?.province || '',
+              city: rg.addressComponent?.city || '',
+              district: rg.addressComponent?.district || '',
+            }
+          } else {
+            selectedAddress.value = {
+              ...selectedAddress.value,
+              location: `${newLng},${newLat}`,
+            }
+          }
+          locationQuery.value = selectedAddress.value.name || '调整后位置'
+        } catch {}
+      })
+      // 延迟刷新地图（解决容器刚显示时的渲染问题）
+      setTimeout(() => mapInstance.value?.invalidateSize(), 300)
+    }
+    function clearMap() {
+      if (mapInstance.value) {
+        mapInstance.value.remove()
+        mapInstance.value = null
+      }
+    }
+
+    onBeforeUnmount(() => clearMap())
 
     async function submitLetterHandler() {
       if (!canSubmit.value || submitting.value) return
@@ -435,6 +571,10 @@ export default {
       displayPhone,
       canSubmit,
       searchLocation,
+      onLocationInput,
+      onLocationBlur,
+      getCurrentLocation,
+      locating,
       selectAddress,
       clearLocation,
       submitLetter: submitLetterHandler,
@@ -650,6 +790,24 @@ textarea.form-input {
   cursor: not-allowed;
   opacity: 0.5;
 }
+
+/* 定位按钮 */
+.btn-locate {
+  padding: 10px 12px;
+  background: #1677ff;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  transition: all 0.2s;
+  margin-left: 6px;
+}
+.btn-locate:hover:not(:disabled) { background: #0958d9; }
+.btn-locate:disabled { cursor: not-allowed; opacity: 0.5; }
+.btn-locate svg.spinning { animation: locate-spin 1s linear infinite; }
+@keyframes locate-spin { to { transform: rotate(360deg); } }
 
 .address-list {
   border: 1px solid #f0f0f0;

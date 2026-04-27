@@ -97,11 +97,40 @@
       </div>
     </div>
   </div>
+
+  <!-- 提交确认弹窗 -->
+  <Teleport to="body">
+    <div v-if="showSubmitDialog" class="modal-overlay" @click.self="showSubmitDialog = false">
+      <div class="modal-card">
+        <div class="modal-header">
+          <svg viewBox="0 0 24 24" width="24" height="24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8z" fill="#52c41a"/></svg>
+          <h3>信件已为您准备好</h3>
+          <button class="modal-close" @click="showSubmitDialog = false">&times;</button>
+        </div>
+        <div class="modal-body">
+          <table class="preview-table">
+            <tbody>
+              <tr><td class="label">群众姓名</td><td class="value">{{ submitDraft.姓名 || '（未填写）' }}</td></tr>
+              <tr><td class="label">手机号</td><td class="value">{{ submitDraft.手机号 || '（未填写）' }}</td></tr>
+              <tr><td class="label">身份证号</td><td class="value">{{ submitDraft.身份证号 || '（未填写）' }}</td></tr>
+              <tr><td class="label">诉求分类</td><td class="value">{{ submitDraft['一级分类'] || '' }}{{ submitDraft['二级分类'] ? ' / ' + submitDraft['二级分类'] : '' }}{{ submitDraft['三级分类'] ? ' / ' + submitDraft['三级分类'] : '' }}</td></tr>
+              <tr><td class="label">诉求描述</td><td class="value description">{{ submitDraft.描述 || '（未填写）' }}</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" @click="handleEditDraft">修改</button>
+          <button class="btn btn-primary" @click="handleSubmitDraft">确认提交</button>
+        </div>
+      </div>
+    </div>
+  </Teleport>
 </template>
 
 <script>
 import { ref, onMounted, nextTick } from 'vue'
 import { getPrompt, getChatStreamUrl } from '../utils/api.js'
+import api from '../utils/api.js'
 import { useRouter } from 'vue-router'
 
 export default {
@@ -115,7 +144,11 @@ export default {
     const aiIconRef = ref(null)
     const aiStatusText = ref('AI 已就绪')
     let systemPrompt = ''
+    const devCode = ref('')
 
+    // 提交确认弹窗
+    const showSubmitDialog = ref(false)
+    const submitDraft = ref({})
     const renderContent = (content) => {
       // Convert markdown-like formatting to HTML
       return content
@@ -135,12 +168,54 @@ export default {
       }
     }
 
+    // 打开编辑页修改草稿
+    const handleEditDraft = () => {
+      localStorage.setItem('letterDraft', JSON.stringify(submitDraft.value))
+      showSubmitDialog.value = false
+      router.push('/write')
+    }
+
+    // 直接提交信件
+    const handleSubmitDraft = async () => {
+      const token = localStorage.getItem('citizen_token')
+      if (!token) {
+        router.push('/login')
+        return
+      }
+      try {
+        const { default: api } = await import('../utils/api.js')
+        const res = await api.post('/letter/submit', submitDraft.value)
+        if (res.data?.letter_no) {
+          messages.value.push({
+            role: 'assistant',
+            content: `✅ 信件已成功提交！信件编号：**${res.data.letter_no}**`
+          })
+          submitDraft.value = {}
+        } else {
+          messages.value.push({
+            role: 'assistant',
+            content: `❌ 提交失败：${res.data?.error || '未知错误'}`
+          })
+        }
+      } catch (e) {
+        messages.value.push({
+          role: 'assistant',
+          content: `❌ 提交失败：${e.response?.data?.error || e.message || '网络错误'}`
+        })
+      }
+      showSubmitDialog.value = false
+    }
+
     const sendMessage = async () => {
       const text = inputText.value.trim()
       if (!text || isLoading.value) return
 
+      // 重置工具命令计数器
+      toolCommandCount = 0
+
       inputText.value = ''
       messages.value.push({ role: 'user', content: text })
+      saveMessages()
       scrollToBottom()
 
       isLoading.value = true
@@ -181,8 +256,16 @@ export default {
               try {
                 const parsed = JSON.parse(data)
                 if (parsed.done) {
-                  // Check for actions
-                  await processAIResponse(fullContent)
+                  // Check for actions and tool commands
+                  const toolResult = await processToolCommands(fullContent)
+                  if (toolResult) {
+                    // 有工具命令需要执行，重新发起AI请求
+                    await continueWithToolResult(toolResult)
+                  } else {
+                    // 没有工具命令，正常处理
+                    await processAIResponse(fullContent)
+                    saveMessages()
+                  }
                   scrollToBottom()
                   break
                 }
@@ -208,16 +291,154 @@ export default {
       }
     }
 
+    // ===== 工具命令处理（:["command","params"]） =====
+
+    const toolCommandRegex = /:\["(map-search|classify|check-phone)",\s*"([^"]+)"\]/g
+    let toolCommandCount = 0  // 防止无限循环
+
+    // 解析并执行工具命令，返回需要继续对话的结果
+    const processToolCommands = async (content) => {
+      const commands = [...content.matchAll(toolCommandRegex)]
+      if (commands.length === 0) return null
+
+      // 最多执行 3 次工具命令，防止无限循环
+      toolCommandCount++
+      if (toolCommandCount > 3) {
+        console.warn('工具命令执行次数过多，停止')
+        return null
+      }
+
+      // 从聊天内容中移除命令文本
+      const lastMsg = messages.value[messages.value.length - 1]
+      if (lastMsg) {
+        lastMsg.content = content.replace(toolCommandRegex, '').trim()
+      }
+
+      const results = []
+      for (const match of commands) {
+        const [, command, param] = match
+        aiStatusText.value = `🔍 正在${command === 'map-search' ? '查询地址' : command === 'classify' ? '分析分类' : '验证信息'}...`
+        const result = await executeToolCommand(command, param)
+        if (result) results.push(result)
+      }
+      return results.length > 0 ? results.join('\n') : null
+    }
+
+    // 执行具体工具命令
+    const executeToolCommand = async (command, param) => {
+      try {
+        if (command === 'map-search') {
+          const res = await api.get('/amap/poi/search', { params: { keywords: param } })
+          const pois = res.data?.pois || []
+          if (pois.length > 0) {
+            const poi = pois[0]
+            return `[map-search结果] 查询"${param}"结果：${poi.name}，地址：${poi.address}，坐标：${poi.location}`
+          }
+          return `[map-search结果] 未找到"${param}"的相关信息`
+        }
+        if (command === 'classify') {
+          const res = await api.post('/letter/classify', { 描述: param })
+          const data = res.data?.data
+          if (data) {
+            return `[classify结果] 分类建议：${data.category_l1 || ''}/${data.category_l2 || ''}/${data.category_l3 || ''}，处理单位：${data.suggested_unit || ''}`
+          }
+          return `[classify结果] 分类分析完成`
+        }
+      } catch (e) {
+        return `[${command}错误] ${e.response?.data?.error || e.message}`
+      }
+      return null
+    }
+
+    // 将工具执行结果回传给AI，继续对话
+    const continueWithToolResult = async (toolResult) => {
+      isLoading.value = true
+      try {
+        // 构建新的消息列表，追加工具执行结果
+        const chatMessages = [
+          { role: 'system', content: systemPrompt },
+          ...messages.value
+            .filter(m => m.role !== 'system')
+            .map(m => ({ role: m.role, content: m.content })),
+          { role: 'system', content: `工具执行结果：\n${toolResult}\n\n请根据以上结果继续处理。` },
+        ]
+
+        const response = await fetch(getChatStreamUrl(), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messages: chatMessages }),
+        })
+
+        const reader = response.body.getReader()
+        const decoder = new TextDecoder()
+        let fullContent = ''
+
+        messages.value.push({ role: 'assistant', content: '' })
+        let currentIdx = messages.value.length - 1
+
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+
+          const chunk = decoder.decode(value)
+          const lines = chunk.split('\n')
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const data = line.slice(6)
+              try {
+                const parsed = JSON.parse(data)
+                if (parsed.done) {
+                  // 递归处理嵌套的工具命令
+                  const nestedResult = await processToolCommands(fullContent)
+                  if (nestedResult) {
+                    await continueWithToolResult(nestedResult)
+                  } else {
+                    await processAIResponse(fullContent)
+                    saveMessages()
+                  }
+                  break
+                }
+                if (parsed.chunk) {
+                  fullContent += parsed.chunk
+                  messages.value[currentIdx].content = fullContent
+                  scrollToBottom()
+                }
+              } catch (e) { /* skip */ }
+            }
+          }
+        }
+      } catch (error) {
+        messages.value.push({
+          role: 'assistant',
+          content: `❌ 工具调用失败：${error.message}`,
+        })
+      } finally {
+        isLoading.value = false
+        aiStatusText.value = 'AI 已就绪'
+      }
+    }
+
     const processAIResponse = async (content) => {
       // Check if AI suggests submitting a letter
-      const submitMatch = content.match(/建议提交信件|生成信件|提交|生成信件格式/)
+      const submitMatch = content.match(/建议提交信件|生成信件|提交|生成信件格式|信件已经为您准备好/)
       const hasData = content.includes('姓名') && content.includes('描述')
 
       if (submitMatch || hasData) {
         // Try to extract structured data
         const draft = extractDraft(content)
-        const lastMsg = messages.value[messages.value.length - 1]
+        // 即使提取不完整，只要 AI 表示"准备好"就弹出
+        if (submitMatch) {
+          // 补全缺失字段
+          if (!draft['姓名']) draft['姓名'] = content.match(/群众姓名[|:：]\s*([^|\n]+)/)?.[1]?.trim() || content.match(/姓名[|:：]\s*([^|\n]+)/)?.[1]?.trim() || ''
+          if (!draft['描述']) draft['描述'] = content.match(/描述[|:：]\s*([^|\n]+(?:\n[^|\n]+)*)/)?.[1]?.trim() || ''
+          // 弹窗
+          submitDraft.value = draft
+          setTimeout(() => { showSubmitDialog.value = true }, 500)
+        }
         if (draft && Object.keys(draft).length > 0) {
+          // 保留填写信件按钮
+          const lastMsg = messages.value[messages.value.length - 1]
           lastMsg.actions = [
             {
               label: '填写信件',
@@ -233,6 +454,7 @@ export default {
 
     const extractDraft = (content) => {
       const draft = {}
+      // 标准 key:value 格式
       const patterns = [
         { key: '姓名', regex: /姓名[：:]\s*([^\n,，]+)/ },
         { key: '手机号', regex: /手机号?[：:]\s*(\d{11})/ },
@@ -240,13 +462,37 @@ export default {
         { key: '一级分类', regex: /一级分类[：:]\s*([^\n,，]+)/ },
         { key: '二级分类', regex: /二级分类[：:]\s*([^\n,，]+)/ },
         { key: '三级分类', regex: /三级分类[：:]\s*([^\n,，]+)/ },
-        { key: '描述', regex: /描述|诉求内容[：:]\s*([\s\S]+?)(?=\n\n|\n###|$)/ },
+        { key: '描述', regex: /描述[：:]\s*([\s\S]+?)(?=\n\n|\n###|$)/ },
       ]
 
       for (const { key, regex } of patterns) {
         const match = content.match(regex)
         if (match) {
           draft[key] = match[1].trim()
+        }
+      }
+
+      // 兼容 markdown 表格格式：| 项目 | 内容 |
+      const tableRowRegex = /\|\s*([^|]+)\s*\|\s*([^|]+)\s*(?:\|)?/g
+      let tableMatch
+      while ((tableMatch = tableRowRegex.exec(content)) !== null) {
+        const label = tableMatch[1].trim()
+        const value = tableMatch[2].trim()
+        if (value && value !== '-') {
+          if (label.includes('分类')) {
+            const parts = value.split('/').map(s => s.trim()).filter(Boolean)
+            if (parts.length >= 1 && !draft['一级分类']) draft['一级分类'] = parts[0]
+            if (parts.length >= 2 && !draft['二级分类']) draft['二级分类'] = parts[1]
+            if (parts.length >= 3 && !draft['三级分类']) draft['三级分类'] = parts[2]
+          } else if (label.includes('姓名') && !draft['姓名']) {
+            draft['姓名'] = value
+          } else if ((label.includes('手机') || label.includes('电话')) && !draft['手机号']) {
+            draft['手机号'] = value
+          } else if (label.includes('身份证') && !draft['身份证号']) {
+            draft['身份证号'] = value
+          } else if (label.includes('描述') || label.includes('诉求')) {
+            draft['描述'] = value
+          }
         }
       }
 
@@ -260,24 +506,47 @@ export default {
       }
     }
 
-    onMounted(async () => {
+    // 保存聊天记录到 sessionStorage（刷新/关闭即清空）
+    const STORAGE_KEY = 'chat_messages'
+    const saveMessages = () => {
       try {
-        const res = await getPrompt()
-        systemPrompt = res.data.prompt
+        const data = messages.value.filter(m => m.content && m.role)
+        sessionStorage.setItem(STORAGE_KEY, JSON.stringify(data))
+      } catch {}
+    }
 
-        messages.value = [
-          {
-            role: 'assistant',
-            content: `👋 您好！我是民意智感 AI 助手。请问您要反映什么问题？请尽量详细描述事件的经过、涉及的单位或人员等信息，我会帮您整理成规范的群众来信。`,
-          },
-        ]
-      } catch (error) {
-        messages.value = [
-          {
-            role: 'assistant',
-            content: `⚠️ 系统初始化失败，请检查后端服务是否已启动。`,
-          },
-        ]
+    onMounted(async () => {
+      // 优先从 sessionStorage 恢复对话
+      const saved = sessionStorage.getItem(STORAGE_KEY)
+      if (saved) {
+        try {
+          const restored = JSON.parse(saved)
+          if (Array.isArray(restored) && restored.length > 0) {
+            messages.value = restored
+          }
+        } catch {}
+      }
+
+      // 如果没有历史记录，加载提示词并显示欢迎消息
+      if (messages.value.length === 0) {
+        try {
+          const res = await getPrompt()
+          systemPrompt = res.data.prompt
+          messages.value = [
+            {
+              role: 'assistant',
+              content: `👋 您好！我是民意智感 AI 助手。请问您要反映什么问题？请尽量详细描述事件的经过、涉及的单位或人员等信息，我会帮您整理成规范的群众来信。`,
+            },
+          ]
+        } catch (error) {
+          messages.value = [
+            {
+              role: 'assistant',
+              content: `⚠️ 系统初始化失败，请检查后端服务是否已启动。`,
+            },
+          ]
+        }
+        saveMessages()
       }
     })
 
@@ -834,5 +1103,117 @@ export default {
   .ai-icon-card {
     padding: 24px 16px;
   }
+}
+
+/* ---- 提交确认弹窗 ---- */
+.modal-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: fadeIn 0.2s ease;
+}
+.modal-card {
+  background: #fff;
+  border-radius: 16px;
+  width: 520px;
+  max-width: 90vw;
+  max-height: 80vh;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.12);
+  display: flex;
+  flex-direction: column;
+  animation: slideUp 0.25s ease;
+}
+.modal-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 20px 24px 0;
+}
+.modal-header h3 {
+  flex: 1;
+  font-size: 17px;
+  font-weight: 600;
+  color: #262626;
+  margin: 0;
+}
+.modal-close {
+  background: none;
+  border: none;
+  font-size: 22px;
+  color: #8c8c8c;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+.modal-close:hover {
+  background: #f5f5f5;
+  color: #262626;
+}
+.modal-body {
+  padding: 16px 24px;
+  overflow-y: auto;
+  flex: 1;
+}
+.modal-body .preview-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.modal-body .preview-table td {
+  padding: 8px 10px;
+  font-size: 13px;
+  border-bottom: 1px solid #f0f0f0;
+  vertical-align: top;
+}
+.modal-body .preview-table td.label {
+  color: #8c8c8c;
+  white-space: nowrap;
+  width: 80px;
+}
+.modal-body .preview-table td.value {
+  color: #262626;
+}
+.modal-body .preview-table td.description {
+  white-space: pre-wrap;
+  line-height: 1.6;
+}
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 16px 24px 20px;
+}
+.modal-footer .btn {
+  padding: 8px 20px;
+  border-radius: 8px;
+  font-size: 14px;
+  border: none;
+  cursor: pointer;
+  font-weight: 500;
+}
+.modal-footer .btn-primary {
+  background: #1677ff;
+  color: #fff;
+}
+.modal-footer .btn-primary:hover {
+  background: #0958d9;
+}
+.modal-footer .btn-secondary {
+  background: #f5f5f5;
+  color: #595959;
+}
+.modal-footer .btn-secondary:hover {
+  background: #e8e8e8;
+}
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes slideUp {
+  from { transform: translateY(20px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
 }
 </style>
