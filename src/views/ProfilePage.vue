@@ -104,13 +104,13 @@ export default {
       return userStore.user?.created_at?.slice(0, 10) || '--'
     })
 
-    const waitingCount = computed(() => letters.value.filter(l => l['当前状态'] === '待受理' || l['当前状态'] === '待分配').length)
+    const waitingCount = computed(() => letters.value.filter(l => l['当前状态'] === '预处理' || l['当前状态'] === '待分配').length)
     const processingCount = computed(() => letters.value.filter(l => l['当前状态'] === '处理中' || l['当前状态'] === '办理中').length)
     const doneCount = computed(() => letters.value.filter(l => l['当前状态'] === '已完成' || l['当前状态'] === '已办结').length)
 
     function statusClass(status) {
       const map = {
-        '待受理': 'status-pending',
+        '预处理': 'status-pending',
         '待分配': 'status-pending',
         '处理中': 'status-processing',
         '办理中': 'status-processing',

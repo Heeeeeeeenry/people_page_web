@@ -92,4 +92,14 @@ export function getInputTips(keywords, city = '') {
   return api.get('/amap/input/tips', { params: { keywords, city } })
 }
 
+// 获取分类树（前端三级联动）
+export function getCategories() {
+  return api.get('/letter/categories')
+}
+
+// AI智能分类
+export function classifyLetter(data) {
+  return api.post('/letter/classify', data)
+}
+
 export default api

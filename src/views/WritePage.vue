@@ -21,8 +21,8 @@
         </div>
 
         <div class="form-group">
-          <label>身份证号</label>
-          <input v-model="form.身份证号" class="form-input" placeholder="18位身份证号码（选填）" maxlength="18" />
+          <label>身份证号 <span class="required">*</span></label>
+          <input v-model="form.身份证号" class="form-input" placeholder="18位身份证号码" maxlength="18" />
         </div>
 
         <!-- 诉求内容 -->
@@ -34,6 +34,38 @@
             rows="8"
             placeholder="请详细描述您要反映的问题，包括事发时间、地点、经过等关键信息..."
           ></textarea>
+        </div>
+
+        <!-- 信件分类（三级联动）+ AI一键分类 -->
+        <div class="form-group">
+          <label>诉求分类 <span class="required">*</span></label>
+          <div class="category-cascade">
+            <select v-model="selectedCat1" class="form-input" @change="onCat1Change">
+              <option value="">请选择一级分类</option>
+              <option v-for="c1 in categories" :key="c1.name" :value="c1.name">{{ c1.name }}</option>
+            </select>
+            <select v-model="selectedCat2" class="form-input" @change="onCat2Change" :disabled="!selectedCat1">
+              <option value="">请选择二级分类</option>
+              <option v-for="c2 in cat2List" :key="c2.name" :value="c2.name">{{ c2.name }}</option>
+            </select>
+            <select v-model="selectedCat3" class="form-input" :disabled="!selectedCat2 || cat3List.length === 0">
+              <option value="">请选择三级分类</option>
+              <option v-for="c3 in cat3List" :key="c3" :value="c3">{{ c3 }}</option>
+            </select>
+          </div>
+          <!-- AI一键分类 -->
+          <div style="margin-top:8px;">
+            <button class="btn btn-ai" :disabled="!form.描述 || aiClassifying" @click="doAIClassify">
+              <svg viewBox="0 0 24 24" width="14" height="14" style="flex-shrink:0"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 15l-4-4 1.41-1.41L11 14.17l6.59-6.59L19 9z" :fill="aiClassifying ? '#999' : '#1677ff'"/></svg>
+              {{ aiClassifying ? 'AI分析中...' : 'AI一键分类' }}
+            </button>
+          </div>
+          <!-- AI分类结果 -->
+          <div v-if="aiSuggestion" class="ai-suggestion">
+            <div class="ai-suggestion-label">🤖 AI建议分类：</div>
+            <div class="ai-suggestion-path">{{ aiSuggestion.一级分类 }}{{ aiSuggestion.二级分类 ? ' / ' + aiSuggestion.二级分类 : '' }}{{ aiSuggestion.三级分类 ? ' / ' + aiSuggestion.三级分类 : '' }}</div>
+            <button class="btn btn-accept" @click="acceptAIClassify">采纳</button>
+          </div>
         </div>
 
         <!-- 位置信息（高德地图选点） -->
@@ -106,6 +138,10 @@
                 <td class="label">身份证号</td>
                 <td class="value">{{ form.身份证号 }}</td>
               </tr>
+              <tr v-if="selectedCat1">
+                <td class="label">诉求分类</td>
+                <td class="value">{{ selectedCat1 }}{{ selectedCat2 ? ' / ' + selectedCat2 : '' }}{{ selectedCat3 ? ' / ' + selectedCat3 : '' }}</td>
+              </tr>
               <tr>
                 <td class="label">事发位置</td>
                 <td class="value">{{ selectedAddress ? selectedAddress.address || selectedAddress.name : '（未填写）' }}</td>
@@ -138,7 +174,7 @@
 
 <script>
 import { ref, reactive, computed, onMounted, inject, nextTick } from 'vue'
-import api, { submitLetter, regeocode, getInputTips } from '../utils/api.js'
+import api, { submitLetter, regeocode, getInputTips, getCategories, classifyLetter } from '../utils/api.js'
 
 export default {
   name: 'WritePage',
@@ -151,6 +187,62 @@ export default {
       身份证号: '',
       描述: '',
     })
+
+    // 分类三级联动
+    const categories = ref([])
+    const selectedCat1 = ref('')
+    const selectedCat2 = ref('')
+    const selectedCat3 = ref('')
+    const cat2List = ref([])
+    const cat3List = ref([])
+
+    function onCat1Change() {
+      selectedCat2.value = ''
+      selectedCat3.value = ''
+      const c1 = categories.value.find(c => c.name === selectedCat1.value)
+      cat2List.value = c1?.children || []
+      cat3List.value = []
+    }
+    function onCat2Change() {
+      selectedCat3.value = ''
+      const c2 = cat2List.value.find(c => c.name === selectedCat2.value)
+      cat3List.value = c2?.children?.map(c => c.name) || []
+    }
+
+    // AI一键分类
+    const aiSuggestion = ref(null)
+    const aiClassifying = ref(false)
+
+    async function doAIClassify() {
+      if (!form.描述 || aiClassifying.value) return
+      aiClassifying.value = true
+      aiSuggestion.value = null
+      try {
+        const res = await classifyLetter({ 描述: form.描述 })
+        aiSuggestion.value = res.data?.data || null
+      } catch (e) {
+        aiSuggestion.value = null
+        alert('AI分类失败：' + (e.response?.data?.error || e.message))
+      } finally {
+        aiClassifying.value = false
+      }
+    }
+
+    function acceptAIClassify() {
+      if (!aiSuggestion.value) return
+      selectedCat1.value = aiSuggestion.value.一级分类 || ''
+      selectedCat2.value = aiSuggestion.value.二级分类 || ''
+      selectedCat3.value = aiSuggestion.value.三级分类 || ''
+      // 触发级联更新
+      if (selectedCat1.value) {
+        const c1 = categories.value.find(c => c.name === selectedCat1.value)
+        cat2List.value = c1?.children || []
+      }
+      if (selectedCat2.value) {
+        const c2 = cat2List.value.find(c => c.name === selectedCat2.value)
+        cat3List.value = c2?.children?.map(c => c.name) || []
+      }
+    }
 
     // 位置相关
     const locationQuery = ref('')
@@ -166,10 +258,17 @@ export default {
     const submitting = ref(false)
 
     // 自动填手机号
-    onMounted(() => {
+    onMounted(async () => {
       if (userStore.user?.phone) {
         form.手机号 = userStore.user.phone
         autoPhone.value = true
+      }
+      // 加载分类
+      try {
+        const res = await getCategories()
+        categories.value = res.data?.data || []
+      } catch (e) {
+        console.warn('加载分类失败', e)
       }
       // 加载草稿
       const draft = localStorage.getItem('letterDraft')
@@ -188,7 +287,7 @@ export default {
     })
 
     const canSubmit = computed(() => {
-      return form.姓名 && form.手机号 && form.描述
+      return form.姓名 && form.手机号 && form.身份证号 && form.描述 && selectedCat1.value
     })
 
     // 搜索地址
@@ -266,6 +365,9 @@ export default {
           手机号: form.手机号,
           身份证号: form.身份证号 || '',
           描述: form.描述,
+          一级分类: selectedCat1.value,
+          二级分类: selectedCat2.value,
+          三级分类: selectedCat3.value,
         }
 
         // 附加位置信息
@@ -299,11 +401,29 @@ export default {
       form.手机号 = userStore.user?.phone || ''
       form.身份证号 = ''
       form.描述 = ''
+      selectedCat1.value = ''
+      selectedCat2.value = ''
+      selectedCat3.value = ''
+      cat2List.value = []
+      cat3List.value = []
+      aiSuggestion.value = null
       clearLocation()
     }
 
     return {
       form,
+      categories,
+      selectedCat1,
+      selectedCat2,
+      selectedCat3,
+      cat2List,
+      cat3List,
+      onCat1Change,
+      onCat2Change,
+      doAIClassify,
+      acceptAIClassify,
+      aiSuggestion,
+      aiClassifying,
       locationQuery,
       addressList,
       selectedAddress,
@@ -430,6 +550,72 @@ textarea.form-input {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 16px;
+}
+
+/* 分类三级联动选择器 */
+.category-cascade {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
+}
+
+/* AI一键分类按钮 */
+.btn-ai {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  font-size: 13px;
+  border: 1px solid #1677ff;
+  background: #f0f5ff;
+  color: #1677ff;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-ai:hover:not(:disabled) {
+  background: #1677ff;
+  color: #fff;
+}
+.btn-ai:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* AI分类建议 */
+.ai-suggestion {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 10px 14px;
+  background: #f6ffed;
+  border: 1px solid #b7eb8f;
+  border-radius: 8px;
+}
+.ai-suggestion-label {
+  font-size: 13px;
+  color: #389e0d;
+  white-space: nowrap;
+}
+.ai-suggestion-path {
+  font-size: 13px;
+  font-weight: 500;
+  color: #135200;
+  flex: 1;
+}
+.btn-accept {
+  padding: 4px 14px;
+  font-size: 12px;
+  background: #52c41a;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.btn-accept:hover {
+  background: #389e0d;
 }
 
 /* 位置搜索 */
