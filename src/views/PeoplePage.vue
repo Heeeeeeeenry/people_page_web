@@ -340,7 +340,7 @@ export default {
           const res = await api.post('/letter/classify', { 描述: param })
           const data = res.data?.data
           if (data) {
-            return `[classify结果] 分类建议：${data.category_l1 || ''}/${data.category_l2 || ''}/${data.category_l3 || ''}，处理单位：${data.suggested_unit || ''}`
+            return `[classify结果] 分类建议：${data['一级分类'] || ''}/${data['二级分类'] || ''}/${data['三级分类'] || ''}`
           }
           return `[classify结果] 分类分析完成`
         }
