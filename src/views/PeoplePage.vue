@@ -506,18 +506,21 @@ export default {
       }
     }
 
-    // 保存聊天记录到 sessionStorage（刷新/关闭即清空）
-    const STORAGE_KEY = 'chat_messages'
+    // 保存聊天记录到 sessionStorage（按用户隔离，刷新即清空）
+    const getStorageKey = () => {
+      const token = localStorage.getItem('citizen_token')
+      return token ? 'chat_' + token.slice(-8) : 'chat_guest'
+    }
     const saveMessages = () => {
       try {
         const data = messages.value.filter(m => m.content && m.role)
-        sessionStorage.setItem(STORAGE_KEY, JSON.stringify(data))
+        sessionStorage.setItem(getStorageKey(), JSON.stringify(data))
       } catch {}
     }
 
     onMounted(async () => {
-      // 优先从 sessionStorage 恢复对话
-      const saved = sessionStorage.getItem(STORAGE_KEY)
+      // 优先从 sessionStorage 恢复对话（仅当前用户）
+      const saved = sessionStorage.getItem(getStorageKey())
       if (saved) {
         try {
           const restored = JSON.parse(saved)

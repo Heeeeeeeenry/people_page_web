@@ -55,6 +55,7 @@ const userName = computed(() => userStore.user?.nickname || userStore.user?.phon
 function handleLogout() {
   localStorage.removeItem('citizen_token')
   localStorage.removeItem('citizen_user')
+  sessionStorage.removeItem('chat_messages')
   userStore.token = null
   userStore.user = null
   userStore.isLoggedIn = false
