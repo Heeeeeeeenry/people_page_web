@@ -289,18 +289,21 @@ export default {
           // 回填分类
           if (data['一级分类']) {
             selectedCat1.value = data['一级分类']
-            await nextTick()
+            // 手动级联：找到对应节点设置二级列表
             const c1 = categories.value.find(c => c.name === selectedCat1.value)
-            cat2List.value = c1?.children || []
-          }
-          if (data['二级分类']) {
-            selectedCat2.value = data['二级分类']
-            await nextTick()
-            const c2 = cat2List.value.find(c => c.name === selectedCat2.value)
-            cat3List.value = c2?.children?.map(c => c.name) || []
-          }
-          if (data['三级分类']) {
-            selectedCat3.value = data['三级分类']
+            if (c1) {
+              cat2List.value = c1.children || []
+              if (data['二级分类']) {
+                selectedCat2.value = data['二级分类']
+                const c2 = cat2List.value.find(c => c.name === selectedCat2.value)
+                if (c2) {
+                  cat3List.value = c2.children?.map(c => c.name) || []
+                  if (data['三级分类']) {
+                    selectedCat3.value = data['三级分类']
+                  }
+                }
+              }
+            }
           }
           localStorage.removeItem('letterDraft')
         } catch (e) {}
