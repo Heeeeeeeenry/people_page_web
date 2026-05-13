@@ -286,6 +286,22 @@ export default {
         try {
           const data = JSON.parse(draft)
           Object.assign(form, data)
+          // 回填分类
+          if (data['一级分类']) {
+            selectedCat1.value = data['一级分类']
+            await nextTick()
+            const c1 = categories.value.find(c => c.name === selectedCat1.value)
+            cat2List.value = c1?.children || []
+          }
+          if (data['二级分类']) {
+            selectedCat2.value = data['二级分类']
+            await nextTick()
+            const c2 = cat2List.value.find(c => c.name === selectedCat2.value)
+            cat3List.value = c2?.children?.map(c => c.name) || []
+          }
+          if (data['三级分类']) {
+            selectedCat3.value = data['三级分类']
+          }
           localStorage.removeItem('letterDraft')
         } catch (e) {}
       }
