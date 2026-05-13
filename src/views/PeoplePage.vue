@@ -420,49 +420,25 @@ export default {
     }
 
     const processAIResponse = async (content) => {
-      // Check if AI suggests submitting a letter
-      const submitMatch = content.match(/建议提交信件|生成信件|提交|生成信件格式|信件已经为您准备好/)
-      const hasData = content.includes('姓名') && content.includes('描述')
-
-      if (submitMatch || hasData) {
-        // Try to extract structured data
-        const draft = extractDraft(content)
-        // 即使提取不完整，只要 AI 表示"准备好"就弹出
-        if (submitMatch) {
-          // 补全缺失字段
-          if (!draft['姓名']) draft['姓名'] = content.match(/群众姓名[|:：]\s*([^|\n]+)/)?.[1]?.trim() || content.match(/姓名[|:：]\s*([^|\n]+)/)?.[1]?.trim() || ''
-          if (!draft['描述']) draft['描述'] = content.match(/描述[|:：]\s*([^|\n]+(?:\n[^|\n]+)*)/)?.[1]?.trim() || ''
-          // 弹窗
-          submitDraft.value = draft
-          setTimeout(() => { showSubmitDialog.value = true }, 500)
-        }
-        if (draft && Object.keys(draft).length > 0) {
-          // 保留填写信件按钮
-          const lastMsg = messages.value[messages.value.length - 1]
-          lastMsg.actions = [
-            {
-              label: '填写信件',
-              icon: 'fas fa-pen',
-              class: 'btn-primary',
-              type: 'fill',
-              payload: draft,
-            },
-          ]
-        }
+      const draft = extractDraft(content)
+      if (draft && Object.keys(draft).length > 0) {
+        const lastMsg = messages.value[messages.value.length - 1]
+        lastMsg.actions = [
+          { label: '填写信件', icon: 'fas fa-pen', class: 'btn-primary', type: 'fill', payload: draft },
+        ]
       }
     }
 
     const extractDraft = (content) => {
       const draft = {}
-      // 标准 key:value 格式
       const patterns = [
-        { key: '姓名', regex: /姓名[：:]\s*([^\n,，]+)/ },
-        { key: '手机号', regex: /手机号?[：:]\s*(\d{11})/ },
-        { key: '身份证号', regex: /身份证[：:]\s*(\d{17}[\dXx])/ },
+        { key: '姓名', regex: /(?:群众)?姓名[：:]\s*([^\n,，]+)/ },
+        { key: '手机号', regex: /(?:手机号|联系电话|电话)[：:]\s*(\d{11})/ },
+        { key: '身份证号', regex: /身份证(?:号)?[：:]\s*(\d{17}[\dXx])/ },
         { key: '一级分类', regex: /一级分类[：:]\s*([^\n,，]+)/ },
         { key: '二级分类', regex: /二级分类[：:]\s*([^\n,，]+)/ },
         { key: '三级分类', regex: /三级分类[：:]\s*([^\n,，]+)/ },
-        { key: '描述', regex: /描述[：:]\s*([\s\S]+?)(?=\n\n|\n###|$)/ },
+        { key: '描述', regex: /(?:诉求)?描述[：:]\s*([\s\S]+?)(?=\n\n|\n###|$)/ },
       ]
 
       for (const { key, regex } of patterns) {
