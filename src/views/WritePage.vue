@@ -36,6 +36,44 @@
           ></textarea>
         </div>
 
+        <!-- 附件上传 -->
+        <div class="form-group">
+          <label>附件材料 <span class="optional">（选填，支持图片/视频/音频/文档）</span></label>
+          <div class="file-grid">
+            <div
+              v-for="(f, idx) in files"
+              :key="idx"
+              class="file-item"
+              :class="{ uploaded: f.url, uploading: f.uploading }"
+            >
+              <button class="file-delete" @click="removeFile(idx)" title="删除">×</button>
+              <!-- 图片预览 -->
+              <img v-if="f.preview && isImageFile(f)" :src="f.preview" class="file-thumb" />
+              <!-- 视频预览 -->
+              <video v-else-if="f.preview && isVideoFile(f)" :src="f.preview" class="file-thumb"></video>
+              <!-- 其他类型图标 -->
+              <div v-else class="file-icon-box">
+                <span class="file-icon">{{ getFileIcon(f) }}</span>
+              </div>
+              <div class="file-info">
+                <div class="file-name">{{ f.name }}</div>
+                <div class="file-size">{{ formatFileSize(f.size) }}</div>
+                <div v-if="f.uploading" class="file-progress"><div class="file-progress-bar" :style="{ width: f.progress + '%' }"></div></div>
+                <span v-else-if="f.url" class="file-status done">✓ 已上传</span>
+                <span v-else class="file-status pending">待上传</span>
+              </div>
+            </div>
+            <!-- 添加按钮 -->
+            <div class="file-item file-add" @click="chooseFile">
+              <div class="file-add-content">
+                <svg viewBox="0 0 24 24" width="28" height="28"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z" fill="#1677ff"/></svg>
+                <span>添加附件</span>
+              </div>
+            </div>
+          </div>
+          <div v-if="files.length > 0" class="file-hint">共 {{ files.length }} 个文件，提交时将自动上传</div>
+        </div>
+
         <!-- 信件分类（三级联动）+ AI一键分类 -->
         <div class="form-group">
           <label>诉求分类 <span class="required">*</span></label>
@@ -181,7 +219,7 @@
 
 <script>
 import { ref, reactive, computed, onMounted, inject, nextTick, onBeforeUnmount } from 'vue'
-import api, { submitLetter, regeocode, getInputTips, getCategories, classifyLetter } from '../utils/api.js'
+import api, { submitLetter, regeocode, getInputTips, getCategories, classifyLetter, uploadFile } from '../utils/api.js'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 
@@ -266,6 +304,87 @@ export default {
 
     const submitResult = ref(null)
     const submitting = ref(false)
+
+    // 文件上传
+    const files = ref([])
+
+    function getFileIcon(f) {
+      const ext = (f.name || '').split('.').pop().toLowerCase()
+      const icons = { jpg: '🖼️', jpeg: '🖼️', png: '🖼️', gif: '🖼️', webp: '🖼️',
+        mp4: '🎬', mov: '🎬', avi: '🎬',
+        mp3: '🎵', wav: '🎵', m4a: '🎵',
+        pdf: '📄', doc: '📄', docx: '📄', xls: '📄', xlsx: '📄' }
+      return icons[ext] || '📎'
+    }
+
+    function isImageFile(f) {
+      return /\.(jpg|jpeg|png|gif|webp)$/i.test(f.name)
+    }
+
+    function isVideoFile(f) {
+      return /\.(mp4|mov|avi)$/i.test(f.name)
+    }
+
+    function formatFileSize(bytes) {
+      if (!bytes) return ''
+      if (bytes < 1024) return bytes + ' B'
+      if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB'
+      return (bytes / 1048576).toFixed(1) + ' MB'
+    }
+
+    function chooseFile() {
+      const input = document.createElement('input')
+      input.type = 'file'
+      input.multiple = true
+      input.accept = 'image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx'
+      input.onchange = async (e) => {
+        for (const file of e.target.files) {
+          const f = {
+            name: file.name,
+            size: file.size,
+            file: file,
+            progress: 0,
+            uploading: false,
+            url: null,
+            preview: null,
+          }
+          // 生成图片/视频预览
+          if (isImageFile(f) || isVideoFile(f)) {
+            f.preview = URL.createObjectURL(file)
+          }
+          files.value.push(f)
+        }
+      }
+      input.click()
+    }
+
+    function removeFile(idx) {
+      const f = files.value[idx]
+      if (f?.preview) URL.revokeObjectURL(f.preview)
+      files.value.splice(idx, 1)
+    }
+
+    async function uploadAllFiles() {
+      const uploadedUrls = []
+      for (let i = 0; i < files.value.length; i++) {
+        const f = files.value[i]
+        if (f.url) {
+          uploadedUrls.push({ url: f.url, name: f.name, size: f.size, type: getFileIcon(f) })
+          continue
+        }
+        f.uploading = true
+        try {
+          const res = await uploadFile(f.file, (p) => { f.progress = p })
+          f.url = res.data?.url || ''
+          f.uploading = false
+          uploadedUrls.push({ url: f.url, name: f.name, size: f.size, type: getFileIcon(f) })
+        } catch (e) {
+          f.uploading = false
+          throw new Error(`文件 ${f.name} 上传失败: ${e.response?.data?.error || e.message}`)
+        }
+      }
+      return uploadedUrls
+    }
 
     // 自动填手机号
     onMounted(async () => {
@@ -515,6 +634,12 @@ export default {
       submitResult.value = null
 
       try {
+        // 先上传所有待上传的文件
+        let fileUrls = []
+        if (files.value.length > 0) {
+          fileUrls = await uploadAllFiles()
+        }
+
         const payload = {
           姓名: form.姓名,
           手机号: form.手机号,
@@ -532,6 +657,11 @@ export default {
           payload.province = selectedAddress.value.province || ''
           payload.city = selectedAddress.value.city || ''
           payload.district = selectedAddress.value.district || ''
+        }
+
+        // 附加文件信息
+        if (fileUrls.length > 0) {
+          payload.files = fileUrls
         }
 
         const res = await submitLetter(payload)
@@ -562,6 +692,9 @@ export default {
       cat2List.value = []
       cat3List.value = []
       aiSuggestion.value = null
+      // 清理文件
+      files.value.forEach(f => { if (f.preview) URL.revokeObjectURL(f.preview) })
+      files.value = []
       clearLocation()
     }
 
@@ -598,6 +731,13 @@ export default {
       clearLocation,
       submitLetter: submitLetterHandler,
       resetForm,
+      files,
+      chooseFile,
+      removeFile,
+      isImageFile,
+      isVideoFile,
+      getFileIcon,
+      formatFileSize,
     }
   },
 }
@@ -1073,5 +1213,159 @@ textarea.form-input {
   .form-row {
     grid-template-columns: 1fr;
   }
+  .file-grid {
+    grid-template-columns: repeat(2, 1fr) !important;
+  }
+}
+
+/* 附件上传 */
+.file-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+
+.file-item {
+  position: relative;
+  border: 1px solid #e8e8e8;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #fafafa;
+  transition: all 0.2s;
+}
+
+.file-item:hover {
+  border-color: #1677ff;
+  box-shadow: 0 2px 8px rgba(22,119,255,0.1);
+}
+
+.file-item.uploaded {
+  border-color: #b7eb8f;
+  background: #f6ffed;
+}
+
+.file-item.uploading {
+  border-color: #1677ff;
+}
+
+.file-delete {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0,0,0,0.4);
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s;
+}
+
+.file-delete:hover {
+  background: #ff4d4f;
+}
+
+.file-thumb {
+  width: 100%;
+  height: 120px;
+  object-fit: cover;
+  display: block;
+}
+
+.file-icon-box {
+  width: 100%;
+  height: 80px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #f0f5ff, #e6f7ff);
+}
+
+.file-icon {
+  font-size: 36px;
+}
+
+.file-info {
+  padding: 8px 10px;
+  background: #fff;
+  border-top: 1px solid #f0f0f0;
+}
+
+.file-name {
+  font-size: 12px;
+  color: #333;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-size {
+  font-size: 11px;
+  color: #999;
+  margin-top: 2px;
+}
+
+.file-progress {
+  height: 4px;
+  background: #f0f0f0;
+  border-radius: 2px;
+  margin-top: 4px;
+  overflow: hidden;
+}
+
+.file-progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #1677ff, #4096ff);
+  border-radius: 2px;
+  transition: width 0.3s;
+}
+
+.file-status {
+  font-size: 11px;
+  margin-top: 2px;
+  display: inline-block;
+}
+
+.file-status.done {
+  color: #52c41a;
+}
+
+.file-status.pending {
+  color: #faad14;
+}
+
+.file-add {
+  cursor: pointer;
+  border: 2px dashed #d9d9d9;
+  background: #fafafa;
+  min-height: 160px;
+}
+
+.file-add:hover {
+  border-color: #1677ff;
+}
+
+.file-add-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 100%;
+  min-height: 160px;
+  color: #1677ff;
+  font-size: 13px;
+}
+
+.file-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #8c8c8c;
 }
 </style>

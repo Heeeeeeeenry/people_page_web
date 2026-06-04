@@ -102,4 +102,22 @@ export function classifyLetter(data) {
   return api.post('/letter/classify', data)
 }
 
+// 上传文件
+export function uploadFile(file, onProgress) {
+  const formData = new FormData()
+  formData.append('file', file)
+  const token = localStorage.getItem('citizen_token')
+  return axios.post('/api/upload', formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    onUploadProgress: (e) => {
+      if (onProgress && e.total) {
+        onProgress(Math.round((e.loaded * 100) / e.total))
+      }
+    },
+  })
+}
+
 export default api
