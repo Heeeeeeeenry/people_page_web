@@ -43,25 +43,44 @@
             <div
               v-for="(f, idx) in files"
               :key="idx"
-              class="file-item"
-              :class="{ uploaded: f.url, uploading: f.uploading }"
+              class="file-item-col"
             >
-              <button class="file-delete" @click="removeFile(idx)" title="删除">×</button>
-              <!-- 图片预览 -->
-              <img v-if="f.preview && isImageFile(f)" :src="f.preview" class="file-thumb" />
-              <!-- 视频预览 -->
-              <video v-else-if="f.preview && isVideoFile(f)" :src="f.preview" class="file-thumb"></video>
-              <!-- 其他类型图标 -->
-              <div v-else class="file-icon-box">
-                <span class="file-icon">{{ getFileIcon(f) }}</span>
+              <div
+                class="file-item"
+                :class="{ uploaded: f.url, uploading: f.uploading }"
+              >
+                <button class="file-delete" @click="removeFile(idx)" title="删除">×</button>
+                <!-- 图片预览 -->
+                <img v-if="f.preview && isImageFile(f)" :src="f.preview" class="file-thumb" />
+                <!-- 视频预览 -->
+                <video v-else-if="f.preview && isVideoFile(f)" :src="f.preview" class="file-thumb"></video>
+                <!-- 其他类型图标 -->
+                <div v-else class="file-icon-box">
+                  <span class="file-icon">{{ getFileIcon(f) }}</span>
+                </div>
+                <div class="file-info">
+                  <div class="file-name">{{ f.name }}</div>
+                  <div class="file-size">{{ formatFileSize(f.size) }}</div>
+                  <div v-if="f.uploading" class="file-progress"><div class="file-progress-bar" :style="{ width: f.progress + '%' }"></div></div>
+                  <span v-else-if="f.url" class="file-status done">✓ 已上传</span>
+                  <span v-else class="file-status pending">待上传</span>
+                </div>
+                <!-- Audio transcription controls -->
+                <div v-if="isAudioFile(f)" class="transcribe-section">
+                  <button v-if="!transcribing[f.url] && !transcripts[f.url]"
+                    class="transcribe-btn"
+                    @click="doTranscribe(f.url)">🎙️ 转文字</button>
+                  <button v-if="transcribeErrors[f.url]"
+                    class="transcribe-btn retry"
+                    @click="doTranscribe(f.url)">🔄 重试转写</button>
+                  <span v-if="transcribing[f.url]" class="transcribing-hint">转写中...</span>
+                </div>
               </div>
-              <div class="file-info">
-                <div class="file-name">{{ f.name }}</div>
-                <div class="file-size">{{ formatFileSize(f.size) }}</div>
-                <div v-if="f.uploading" class="file-progress"><div class="file-progress-bar" :style="{ width: f.progress + '%' }"></div></div>
-                <span v-else-if="f.url" class="file-status done">✓ 已上传</span>
-                <span v-else class="file-status pending">待上传</span>
-              </div>
+              <TypewriterText v-if="transcripts[f.url]"
+                :text="transcripts[f.url]"
+                :typing="!!transcribing[f.url]"
+                :speed="25"
+              />
             </div>
             <!-- 添加按钮 -->
             <div class="file-item file-add" @click="chooseFile">
@@ -220,11 +239,13 @@
 <script>
 import { ref, reactive, computed, onMounted, inject, nextTick, onBeforeUnmount } from 'vue'
 import api, { submitLetter, regeocode, getInputTips, getCategories, classifyLetter, uploadFile } from '../utils/api.js'
+import TypewriterText from '../components/TypewriterText.vue'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 
 export default {
   name: 'WritePage',
+  components: { TypewriterText },
   setup() {
     const userStore = inject('userStore')
 
@@ -308,6 +329,11 @@ export default {
     // 文件上传
     const files = ref([])
 
+    // Audio transcription
+    const transcripts = reactive({})
+    const transcribing = reactive({})
+    const transcribeErrors = reactive({})
+
     function getFileIcon(f) {
       const ext = (f.name || '').split('.').pop().toLowerCase()
       const icons = { jpg: '🖼️', jpeg: '🖼️', png: '🖼️', gif: '🖼️', webp: '🖼️',
@@ -323,6 +349,11 @@ export default {
 
     function isVideoFile(f) {
       return /\.(mp4|mov|avi)$/i.test(f.name)
+    }
+
+    function isAudioFile(f) {
+      const name = (f.name || '').toLowerCase()
+      return name.endsWith('.mp3') || name.endsWith('.wav') || name.endsWith('.m4a') || name.endsWith('.ogg') || name.endsWith('.flac')
     }
 
     function formatFileSize(bytes) {
@@ -362,6 +393,45 @@ export default {
       const f = files.value[idx]
       if (f?.preview) URL.revokeObjectURL(f.preview)
       files.value.splice(idx, 1)
+    }
+
+    async function doTranscribe(url) {
+      if (transcribing[url]) return
+      transcribing[url] = true
+      delete transcribeErrors[url]
+      if (!transcripts[url]) transcripts[url] = ''
+
+      try {
+        const response = await fetch('/api/tool/transcribe_stream/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ audio_url: url })
+        })
+        const reader = response.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          const messages = buffer.split('\n\n')
+          buffer = messages.pop()
+          for (const msg of messages) {
+            const em = msg.match(/^event:\s*(.+)$/m)
+            if (!em) continue
+            const event = em[1].trim()
+            const dl = msg.match(/^data:\s*(.*)$/gm)
+            const data = dl ? dl.map(l => l.replace(/^data:\s*/, '')).join('\n') : ''
+            if (event === 'chunk') transcripts[url] = (transcripts[url] || '') + data
+            else if (event === 'error') { transcribeErrors[url] = data; transcribing[url] = false }
+            else if (event === 'done') transcribing[url] = false
+            else if (event === 'status') { /* ignore */ }
+          }
+        }
+      } catch (e) {
+        transcribeErrors[url] = e.message || '转写失败'
+        transcribing[url] = false
+      }
     }
 
     async function uploadAllFiles() {
@@ -736,8 +806,13 @@ export default {
       removeFile,
       isImageFile,
       isVideoFile,
+      isAudioFile,
       getFileIcon,
       formatFileSize,
+      doTranscribe,
+      transcripts,
+      transcribing,
+      transcribeErrors,
     }
   },
 }
@@ -1234,6 +1309,12 @@ textarea.form-input {
   transition: all 0.2s;
 }
 
+.file-item-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .file-item:hover {
   border-color: #1677ff;
   box-shadow: 0 2px 8px rgba(22,119,255,0.1);
@@ -1365,6 +1446,48 @@ textarea.form-input {
 
 .file-hint {
   margin-top: 8px;
+  font-size: 12px;
+  color: #8c8c8c;
+}
+
+/* Audio transcription */
+.transcribe-section {
+  padding: 8px 10px;
+  border-top: 1px solid #f0f0f0;
+  background: #fff;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.transcribe-btn {
+  font-size: 12px;
+  color: #1677ff;
+  background: #f0f5ff;
+  border: 1px solid #d6e4ff;
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.transcribe-btn:hover {
+  background: #1677ff;
+  color: #fff;
+}
+
+.transcribe-btn.retry {
+  color: #ff4d4f;
+  background: #fff2f0;
+  border-color: #ffccc7;
+}
+
+.transcribe-btn.retry:hover {
+  background: #ff4d4f;
+  color: #fff;
+}
+
+.transcribing-hint {
   font-size: 12px;
   color: #8c8c8c;
 }
