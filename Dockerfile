@@ -25,7 +25,7 @@ COPY --from=builder /src/dist /usr/share/nginx/html
 
 # 健康检查
 HEALTHCHECK --interval=15s --timeout=3s --retries=3 \
-    CMD wget -qO- http://localhost:5174/ || exit 1
+    CMD wget -qO- http://127.0.0.1:5174/ || exit 1
 
 EXPOSE 5174
 
